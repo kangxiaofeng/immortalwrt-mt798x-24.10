@@ -65,8 +65,14 @@ jobs:
         
     - name: 复制配置文件
       run: |
-        # 使用 MT7986 AX6000 配置
-        cp -f immortalwrt/defconfig/mt7986-ax6000.config immortalwrt/.config
+        # 使用仓库根目录的 .config 文件
+        if [ -f ".config" ]; then
+          echo "使用仓库中的 .config 文件"
+          cp -f .config immortalwrt/.config
+        else
+          echo "仓库中没有 .config 文件，使用默认配置"
+          cp -f immortalwrt/defconfig/mt7986-ax6000.config immortalwrt/.config
+        fi
         
     - name: 编译固件
       id: compile
