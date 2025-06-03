@@ -1,0 +1,149 @@
+name: 编译 ImmortalWrt 固件
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+        
+    - name: 检查初始空间
+      run: |
+        echo "======================="
+        echo "初始空间使用情况："
+        echo "======================="
+        df -h
+        
+    - name: 清理系统空间
+      run: |
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /opt/microsoft
+        sudo rm -rf /opt/pipx
+        sudo rm -rf /usr/share/swift
+        echo "======================="
+        echo "清理后空间使用情况："
+        echo "======================="
+        df -h
+        
+    - name: 安装编译依赖
+      run: |
+        sudo apt update -y
+        sudo apt full-upgrade -y
+        sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+          libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+          ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+          python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          
+    - name: 克隆 ImmortalWrt 源码
+      run: |
+        git clone -b 2410 --single-branch --filter=blob:none https://github.com/padavanonly/immortalwrt-mt798x-24.10 immortalwrt
+        
+    - name: 更新 feeds
+      run: |
+        cd immortalwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+    - name: 复制配置文件
+      run: |
+        # 使用 MT7986 AX6000 配置
+        cp -f immortalwrt/defconfig/mt7986-ax6000.config immortalwrt/.config
+        
+    - name: 编译固件
+      id: compile
+      run: |
+        cd immortalwrt
+        make defconfig
+        
+        # 设置并行编译参数
+        THREAD_COUNT=$(nproc)
+        echo "CPU 核心数: $THREAD_COUNT"
+        
+        # 限制内存使用
+        ulimit -v 6000000  # 限制虚拟内存使用为 6GB
+        
+        # 使用 ccache 加速编译
+        export CCACHE_DIR=/tmp/ccache
+        mkdir -p $CCACHE_DIR
+        ccache -M 10G
+        
+        # 使用并行编译
+        make -j$((THREAD_COUNT + 1)) V=s IGNORE_ERRORS=1
+        
+        # 检查编译结果
+        if [ $? -ne 0 ]; then
+          echo "编译失败"
+          exit 1
+        fi
+        
+    - name: 验证固件文件
+      run: |
+        cd immortalwrt
+        echo "检查固件文件是否存在："
+        ls -l bin/targets/*/*/*.bin || true
+        if [ ! -d "bin/targets" ]; then
+          echo "错误：固件目录不存在"
+          exit 1
+        fi
+        if ! ls bin/targets/*/*/*.bin 1> /dev/null 2>&1; then
+          echo "错误：未找到任何固件文件"
+          exit 1
+        fi
+        
+    - name: 生成构建信息
+      id: buildinfo
+      run: |
+        echo "BUILD_DATE=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_ENV
+        echo "BUILD_TAG=$(TZ='Asia/Shanghai' date +'%Y%m%d')" >> $GITHUB_ENV
+        cd immortalwrt
+        echo "GIT_REV=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        
+    - name: 上传到 Release
+      if: ${{ steps.compile.outcome == 'success' }}
+      uses: ncipollo/release-action@v1
+      with:
+        tag: ImmortalWrt_MT798X_${{ env.BUILD_TAG }}
+        artifacts: "immortalwrt/bin/targets/*/*/*.bin"
+        allowUpdates: true
+        token: ${{ secrets.GITHUB_TOKEN }}
+        body: |
+          ### ImmortalWrt MT798X 固件构建
+          **首次使用建议全新刷写**
+          
+          **基本信息**
+          - 管理 IP: 192.168.6.1 或 immortalwrt.lan
+          - 用户名: root
+          - 密码: 无
+          
+          **固件说明**
+          - `*-initramfs-kernel.bin`: 完整系统镜像，适合首次刷机或系统恢复
+          - `*-squashfs-sysupgrade.bin`: 系统升级包，适合日常更新（保留配置）
+          
+          **使用建议**
+          - 首次刷机：使用 initramfs 版本
+          - 系统升级：使用 sysupgrade 版本
+          - 系统变砖：使用 initramfs 版本恢复
+          
+          **构建信息**
+          - 构建日期: ${{ env.BUILD_DATE }}
+          - 源码版本: ${{ env.GIT_REV }}
+          - 源码分支: 2410
